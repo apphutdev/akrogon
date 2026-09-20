@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { phaseSchema, slotSchema, verdictSchema } from './routing';
+import { phaseSchema, slotSchema, verdictSchema, prioritySchema, riskSchema, taskKindSchema } from './routing';
 import { type Repo } from './config';
 import { writeYaml } from './shell';
 import { issueFolders } from './park';
@@ -42,6 +42,13 @@ export const stateSchema = z
     'blocked-by': z.array(z.string()),
     sources: z.array(z.string().regex(sourcePattern)).optional(),
     hand_built: z.boolean().optional(),
+    priority: prioritySchema.default('normal'),
+    risk: riskSchema.default('medium'),
+    task_kind: taskKindSchema.default('general'),
+    spec_critic: z.enum(['required', 'optional', 'off']).default('off'),
+    acceptance: z.enum(['independent', 'implementation', 'off']).default('implementation'),
+    architecture_review: z.enum(['auto', 'required', 'off']).default('auto'),
+    replan_rounds: z.number().int().nonnegative().default(0),
     busy_since: z.object({ A: z.string().optional(), B: z.string().optional() }).default({}),
     busy_notified: z.object({ A: z.string().optional(), B: z.string().optional() }).default({}),
     attempts: counts.prefault({}),
@@ -59,7 +66,6 @@ export const stateSchema = z
   .refine((state) => new Set(state.done).size === state.done.length, 'Duplicate done slot');
 
 export type State = z.infer<typeof stateSchema>;
-
 export type Leaf = { path: string; state: State };
 
 export class RepoMismatchError extends Error {
@@ -72,22 +78,16 @@ export function readState(path: string): State {
   const parsed: ReturnType<typeof Bun.YAML.parse> = Bun.YAML.parse(readFileSync(resolve(path, 'state.yaml'), 'utf8'));
   return stateSchema.parse(
     parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? Object.fromEntries(
-          Object.entries(parsed).filter(([key]) => key !== 'priority' && key !== 'slot' && key !== 'failed_notified'),
-        )
+      ? Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== 'slot' && key !== 'failed_notified'))
       : parsed,
   );
 }
 
-export function saveState(path: string, state: State): void {
-  writeYaml(resolve(path, 'state.yaml'), state);
-}
+export function saveState(path: string, state: State): void { writeYaml(resolve(path, 'state.yaml'), state); }
 
 export function validateLeafDepth(areaRoot: string, leafPath: string): void {
   const depth: number = relative(areaRoot, leafPath).split(sep).filter(Boolean).length;
-  z.number()
-    .refine((value) => value === 2 || value === 3, `Invalid leaf depth: ${resolve(leafPath, 'state.yaml')}`)
-    .parse(depth);
+  z.number().refine((value) => value === 2 || value === 3, `Invalid leaf depth: ${resolve(leafPath, 'state.yaml')}`).parse(depth);
 }
 
 export function leavesUnder(path: string, areaRoot: string): Leaf[] {
@@ -96,9 +96,7 @@ export function leavesUnder(path: string, areaRoot: string): Leaf[] {
     validateLeafDepth(areaRoot, path);
     return [{ path, state: readState(path) }];
   }
-  return readdirSync(path, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => leavesUnder(resolve(path, entry.name), areaRoot));
+  return readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => leavesUnder(resolve(path, entry.name), areaRoot));
 }
 
 export function allLeaves(repo: Repo): Leaf[] {
@@ -121,10 +119,7 @@ export function missingLeafMessage(repo: Repo, slug: string): string {
     const ownerPath: string = resolve(parkedRoot, owner);
     return issueFolders(ownerPath, '.').some((child) => {
       const childPath: string = resolve(ownerPath, child);
-      return (
-        (child === slug && existsSync(resolve(childPath, 'state.yaml'))) ||
-        issueFolders(childPath, '.').some((leaf) => leaf === slug && existsSync(resolve(childPath, leaf, 'state.yaml')))
-      );
+      return ((child === slug && existsSync(resolve(childPath, 'state.yaml'))) || issueFolders(childPath, '.').some((leaf) => leaf === slug && existsSync(resolve(childPath, leaf, 'state.yaml'))));
     });
   });
   return `Missing leaf: ${slug}${parked ? ' (parked)' : ''}`;
@@ -137,23 +132,18 @@ export function findLeaf(repo: Repo, slug: string): Leaf {
 }
 
 export async function withLock<T>(path: string, action: () => Promise<T>): Promise<T> {
-  const child: Bun.Subprocess<'pipe', 'pipe', 'pipe'> = Bun.spawn(
-    ['flock', '-x', path, 'sh', '-c', 'printf locked; cat >/dev/null'],
-    { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' },
-  );
+  const child: Bun.Subprocess<'pipe', 'pipe', 'pipe'> = Bun.spawn(['flock', '-x', path, 'sh', '-c', 'printf locked; cat >/dev/null'], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
   const reader: ReadableStreamDefaultReader<Uint8Array> = child.stdout.getReader();
   const acquired: Awaited<ReturnType<typeof reader.read>> = await reader.read();
   if (acquired.done) {
     const stderr: string = await new Response(child.stderr).text();
     throw new Error(JSON.stringify({ lock: path, code: await child.exited, stderr }));
   }
-  try {
-    return await action();
-  } finally {
+  try { return await action(); }
+  finally {
     child.stdin.end();
     reader.releaseLock();
     const code: number = await child.exited;
-    if (code !== 0)
-      throw new Error(JSON.stringify({ lock: path, code, stderr: await new Response(child.stderr).text() }));
+    if (code !== 0) throw new Error(JSON.stringify({ lock: path, code, stderr: await new Response(child.stderr).text() }));
   }
 }
