@@ -12,14 +12,17 @@ export const phaseSchema = z.enum([
 ]);
 
 export const slotSchema = z.enum(['A', 'B']);
-
 export const verdictSchema = z.enum(['ready', 'nits', 'fix']);
+export const prioritySchema = z.enum(['low', 'normal', 'high', 'critical']);
+export const riskSchema = z.enum(['low', 'medium', 'high']);
+export const taskKindSchema = z.enum(['frontend', 'backend', 'database', 'security', 'refactor', 'test', 'docs', 'general']);
 
 export type Phase = z.infer<typeof phaseSchema>;
-
 export type Slot = z.infer<typeof slotSchema>;
-
 export type Verdict = z.infer<typeof verdictSchema>;
+export type Priority = z.infer<typeof prioritySchema>;
+export type Risk = z.infer<typeof riskSchema>;
+export type TaskKind = z.infer<typeof taskKindSchema>;
 
 type Route = { skill: string | null; slots: readonly Slot[]; next: readonly Phase[] };
 
